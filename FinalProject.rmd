@@ -1,0 +1,591 @@
+---
+title: Potential current distribution of the ectomycorrhizal fungi Thelephora terrestris
+  and comparison with its host tree distribution
+author: "Narda J Trivino"
+date: '2022-11-23'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+`````{r, message=FALSE, warning=FALSE}
+# Clear all existing data
+rm(list=ls())
+# Close graphics devices
+graphics.off()
+getwd()
+```
+
+`````{r, message=FALSE, warning=FALSE}
+# Set paths
+data_path<-file.path("data","final_project")
+output_path<-"output"
+```
+
+`````{r, message=FALSE, warning=FALSE}
+#data from Global Fungi for Telephora terrestris
+telephoradata <- read.table("telephora.csv",  header=TRUE,  sep=",", fill = TRUE)
+
+library(dismo)   
+library(raster)     
+library(sp)
+library(jsonlite)
+
+```
+
+
+`````{r, message=FALSE, warning=FALSE}
+library(dplyr)
+#exploting dataset
+
+#subset columns 
+#subset columns for telephora in the Northamerica
+
+telephorasubset<-telephoradata %>% dplyr::select(c('id','continent','longitude','latitude'))
+telephoraenusa<- telephorasubset  %>% filter(continent == 'North America' )
+telephoraenusa3<- telephorasubset  %>% dplyr::select(c('longitude','latitude'))
+```
+
+
+`````{r, message=FALSE, warning=FALSE}
+#starting with data preparation for SDMs of telophora 
+#inspect the data
+head(telephoraenusa)
+
+#maptoexplore
+library(maptools)
+data(wrld_simpl)
+plot(wrld_simpl, xlim=c(-120,60), ylim=c(-60,70), axes=TRUE, col="light yellow")
+# restore the box around the map
+box()
+# add the points
+points(telephoraenusa$longitude, telephoraenusa$latitude, col='orange', pch=20, cex=0.75)
+# plot points again to add a border, for better visibility
+points(telephoraenusa$longitude, telephoraenusa$longitude, col='red', cex=0.75)
+```
+
+
+`````{r, message=FALSE, warning=FALSE}
+#cross checking with sp 
+library(sp)
+coordinates(telephoraenusa) <- ~longitude+latitude
+crs(telephoraenusa) <- crs(wrld_simpl)
+class(telephoraenusa)
+class(wrld_simpl)
+ovr <- over(telephoraenusa, wrld_simpl)
+head(ovr)
+cntr <- ovr$NAME
+
+plot(telephoraenusa)
+plot(wrld_simpl, add=T, border='blue', lwd=2)
+```
+
+
+```{r , message=FALSE, warning=FALSE}
+#testing sampling bias
+# create a RasterLayer with the extent of telephoraenusa
+rstrlayr <- raster(telephoraenusa)
+
+# set the resolution of the cells to (for example) 1 degree
+res(rstrlayr) <- 2
+
+# expand (extend) the extent of the RasterLayer a little
+rstrlayr <- extend(rstrlayr, extent(rstrlayr)+1)
+# sample:
+acsel <- gridSample(telephoraenusa, rstrlayr, n=1)
+
+# to illustrate the method and show the result
+p <- rasterToPolygons(rstrlayr)
+plot(acsel)
+points(telephoraenusa)
+# selected points in red
+points(acsel, cex=1, col='red', pch='x')
+```
+
+```{r , message=FALSE, warning=FALSE}
+#extracting environmental data from Worldclim
+library(raster)
+# Use the getData command
+?getData
+# World-wide, all bioclim variables, 10 minutes of a degree resolution
+w_data_world<-getData('worldclim', var='bio', res=10)
+plot(w_data_world)
+```
+
+```{r , message=FALSE, warning=FALSE}
+#raster stack of predicted variables (current)
+predictors_current <- stack(w_data_world)
+predictors_current
+names(predictors_current)
+plot(predictors_current)
+
+```
+
+```{r , message=FALSE, warning=FALSE}
+plot(predictors_current, 1)
+
+#extract predictors current
+presentvalues <- raster::extract(predictors_current, telephoraenusa3)
+set.seed(0)
+backgr <- randomPoints(predictors_current, 500)
+absvals2 <- raster::extract(predictors_current, backgr)
+pb2 <- c(rep(1, nrow(presentvalues)), rep(0, nrow(absvals2)))
+sdmdata2 <- data.frame(cbind(pb2, rbind(presentvalues, absvals2)))
+
+head(sdmdata2)
+summary(sdmdata2)
+pairs(sdmdata2[,2:5], cex=0.1)
+
+```
+
+
+
+
+```{r , message=FALSE, warning=FALSE}
+
+# this creates a 4-decimal-degree buffer around the
+# occurrence data
+obuffer <- buffer(rstrlayr, 4)
+plot(predictors_current[[1]])
+plot(telephoraenusa , add = T, col = "red")  # adds occurrence data to the plot
+plot(obuffer, add = T, col = "blue")  # adds buffer polygon to the plot
+```
+
+
+```{r , message=FALSE, warning=FALSE}
+# crop study area 
+studyArea <- crop(predictors_current,extent(obuffer))  
+plot(studyArea)
+
+```
+
+```{r , message=FALSE, warning=FALSE}
+# select background points from this buffered area; when the number provided 
+
+set.seed(1) 
+bg <- sampleRandom(x=studyArea,
+                   size=10000,
+                   na.rm=T, #removes the 'Not Applicable' points  
+                   sp=T) # return spatial points 
+group <- kfold(bg, 5)
+#background points test and train
+backg_train <- bg[group != 1, ]
+backg_test <- bg[group == 1, ]
+
+plot(studyArea[[1]])
+# add the background points to the plotted raster
+plot(bg,add=T) 
+# add the occurrence data to the plotted raster
+plot(telephoraenusa,add=TRUE, col="red")
+
+```
+
+```{r , message=FALSE, warning=FALSE}
+# get the same random sample for training and testing
+set.seed(0)
+group2 <- kfold(telephoraenusa3, 5)
+# randomly select 50% for training
+data_train <- telephoraenusa3[group2!= 1, ]  # used for model training
+data_test <- telephoraenusa3[group2== 1, ]  # used for model testing
+
+```
+
+```{r , message=FALSE, warning=FALSE}
+# extracting env conditions 
+# stack; a data frame is returned (i.e multiple columns)
+p <- raster::extract(predictors_current, data_train)
+# env conditions for testing occ
+p_test <- raster::extract(predictors_current, data_test)
+# extracting env conditions for background
+a <- raster::extract(predictors_current, bg)
+
+```
+
+```{r , message=FALSE, warning=FALSE}
+#repeat the number 1 as many numbers as the number of rows
+# in p, and repeat 0 as the rows of background points
+pa <- c(rep(1, nrow(p)), rep(0, nrow(a)))
+pder <- as.data.frame(rbind(p, a))
+```
+
+```{r , message=FALSE, warning=FALSE}
+# train Maxent with spatial data mycorrhizal
+
+mod<-maxent(predictors_current, data_train)
+
+ped1 <- predict(mod, studyArea)  # studyArea is the clipped rasters 
+plot(ped1)
+
+```
+
+
+
+```{r , message=FALSE, warning=FALSE}
+#bioclim
+
+pred_nfs<-dropLayer(predictors_current, 'biome')
+
+bclim <- bioclim(pred_nfs, data_train)
+plot(bclim, a=1, b=2, p=0.85)
+
+e <- evaluate(data_test, backg_test, bclim, pred_nfs)
+e
+
+tre <- threshold(e, 'spec_sens')
+tre
+
+```
+```{r , message=FALSE, warning=FALSE}
+
+pb2 <- predict(pred_nfs, bclim, progress='')
+pb2
+
+northame <- crop(pb2,extent(obuffer))
+
+par(mfrow=c(1,2))
+plot(northame, main='Bioclim, raw values')
+
+
+```
+```{r , message=FALSE, warning=FALSE}
+equalextent<-extent(-155.8333,-53.83333,9.333333,69.33333)
+
+makesameextentpb2 <- crop(pb2,extent(equalextent))
+modelstogether <- stack(makesameextentpb2, ped1)
+
+library(RColorBrewer)
+my.palette <- brewer.pal(n = 9, name = "Blues")
+modelstogethermean <- mean(modelstogether)
+plot(modelstogethermean, main="Potential current distribution of Telephora terrestris")
+```
+```{r , message=FALSE, warning=FALSE}
+
+#red oak and red pine 
+
+redpine.gbif <- read.table("Red_pine_gbif_preserved_specimens.csv",  header=TRUE,  sep=",", fill = TRUE)
+redoak.gbif <- read.table("Red_oak_gbif_preserved_specimens.csv",  header=TRUE,  sep=",", fill = TRUE)
+
+#select data with coordinates
+redpine.1 <- subset(redpine.gbif, !is.na(decimalLongitude) & !is.na(decimalLatitude))
+redoak.1 <- subset(redoak.gbif, !is.na(decimalLongitude) & !is.na(decimalLatitude))
+redpinedata<-redpine.1  %>% dplyr::select(c("decimalLongitude","decimalLatitude"))
+redoakdata<-redoak.1  %>% dplyr::select(c("decimalLongitude","decimalLatitude"))
+
+#subset columns for red pine in the us
+redpinesubset<-redpine.1  %>% dplyr::select(c("decimalLongitude","decimalLatitude"))
+redpinesubsetnames <- setNames(redpinesubset, c("longitude","latitude"))
+
+#subset columns for red oak in the us
+redoaksubset<-redoak.1  %>% dplyr::select(c("decimalLongitude","decimalLatitude"))
+redoaksubsetnames <- setNames(redoaksubset, c("longitude","latitude"))
+
+```
+
+```{r , message=FALSE, warning=FALSE}
+#maptoexplore
+data(wrld_simpl)
+plot(wrld_simpl, xlim=c(-120,60), ylim=c(-60,70), axes=TRUE, col="light yellow")
+# restore the box around the map
+box()
+# add the points
+points(redpinesubset$decimalLongitude, redpinesubset$decimalLatitude, col='blue', pch=20, cex=0.75)
+points(redoaksubset$decimalLongitude, redoaksubset$decimalLatitude, col='red' , pch=20, cex=0.75)
+```
+
+
+
+```{r , message=FALSE, warning=FALSE}
+#cross checking with sp 
+library(sp)
+coordinates(redpinesubset) <- ~decimalLongitude+decimalLatitude
+crs(redpinesubset) <- crs(wrld_simpl)
+class(redpinesubset)
+class(wrld_simpl)
+ovrred <- over(redpinesubset, wrld_simpl)
+head(ovr)
+cntrred <- ovrred$NAME
+
+plot(redpinesubset)
+plot(wrld_simpl, add=T, border='blue', lwd=2)
+
+#extract predictors current pine
+presentvaluespine <- raster::extract(predictors_current, redpinesubset)
+set.seed(0)
+backgrpine <- randomPoints(predictors_current, 500)
+absvals2pine <- raster::extract(predictors_current, backgrpine)
+pb2pine <- c(rep(1, nrow(presentvaluespine)), rep(0, nrow(absvals2pine)))
+sdmdata2pine <- data.frame(cbind(pb2pine, rbind(presentvaluespine, absvals2pine)))
+
+head(sdmdata2pine)
+summary(sdmdata2pine)
+pairs(sdmdata2pine[,2:5], cex=0.1)
+```
+
+
+```{r , message=FALSE, warning=FALSE}
+library(sp)
+coordinates(redoaksubset) <- ~decimalLongitude+decimalLatitude
+crs(redoaksubset) <- crs(wrld_simpl)
+class(redoaksubset)
+class(wrld_simpl)
+ovroak <- over(redoaksubset, wrld_simpl)
+head(ovroak)
+cntroak <- ovroak$NAME
+plot(redoaksubset)
+plot(wrld_simpl, add=T, border='blue', lwd=2)
+
+#extract predictors current oak
+presentvaluesoak <- raster::extract(predictors_current, redoaksubset)
+set.seed(0)
+backgroak <- randomPoints(predictors_current, 500)
+absvals2oak <- raster::extract(predictors_current, backgroak)
+pb2oak <- c(rep(1, nrow(presentvaluesoak)), rep(0, nrow(absvals2oak)))
+sdmdata2oak <- data.frame(cbind(pb2oak, rbind(presentvaluesoak, absvals2oak)))
+head(sdmdata2oak)
+summary(sdmdata2oak)
+pairs(sdmdata2oak[,2:5], cex=0.1)
+```
+```{r , message=FALSE, warning=FALSE}
+#testing sampling bias
+# create a RasterLayer with the extent of telephoraenusa
+rstrlayrredpine <- raster(redpinesubset)
+rstrlayrredoak <- raster(redoaksubset)
+# set the resolution of the cells to (for example) 1 degree
+res(rstrlayrredpine) <- 2
+res(rstrlayrredoak) <- 2
+
+# expand (extend) the extent of the RasterLayer a little
+rstrlayreedpine <- extend(rstrlayrredpine, extent(rstrlayrredpine)+1)
+rstrlayredoak <- extend(rstrlayrredoak, extent(rstrlayrredoak)+1)
+# sample:
+acselredpine <- gridSample(redpinesubset, rstrlayr, n=1)
+acselredoak <- gridSample(redpinesubset, rstrlayr, n=1)
+
+# to illustrate the method and show the result red pine
+predpine <- rasterToPolygons(rstrlayrredpine)
+plot(predpine, border='gray')
+points(redpinesubset)
+# selected points in red
+points(acselredpine, cex=1, col='blue', pch='x')
+
+# to illustrate the method and show the result red oak
+predoak <- rasterToPolygons(rstrlayrredoak)
+plot(predoak, border='gray')
+points(redoaksubset)
+# selected points in red
+points(acselredoak, cex=1, col='red', pch='x')
+
+
+```
+
+
+
+
+
+```{r , message=FALSE, warning=FALSE}
+
+# this creates a 4-decimal-degree buffer around the
+# occurrence data redpine
+obufferredpine <- buffer(rstrlayrredpine, 4)
+plot(predictors_current[[1]])
+plot(redpinesubset , add = T, col = "red")  # adds occurrence data to the plot
+plot(obufferredpine, add = T, col = "blue")  # adds buffer polygon to the plot
+
+# this creates a 4-decimal-degree buffer around the
+# occurrence data red oak
+obufferredoak <- buffer(rstrlayrredoak, 4)
+plot(predictors_current[[1]])
+plot(redoaksubset , add = T, col = "red")  # adds occurrence data to the plot
+plot(obufferredoak, add = T, col = "blue")  # adds buffer polygon to the plot
+
+
+```
+
+```{r , message=FALSE, warning=FALSE}
+# crop study area redpine
+studyArearedpine <- crop(predictors_current,extent(obuffer))  
+plot(studyArearedpine)
+
+# crop study area redoak
+studyArearedoak <- crop(predictors_current,extent(obuffer))  
+plot(studyArearedoak)
+
+```
+```{r , message=FALSE, warning=FALSE}
+#background redpine
+set.seed(1) 
+bgredpine <- sampleRandom(x=studyArea,
+                   size=10000,
+                   na.rm=T, #removes the 'Not Applicable' points  
+                   sp=T) # return spatial points 
+groupredpine <- kfold(bgredpine, 5)
+#background points test and train
+backg_trainredpine <- bgredpine[group != 1, ]
+backg_testredpine <- bgredpine[group == 1, ]
+
+plot(studyArearedpine[[1]])
+# add the background points to the plotted raster
+plot(bgredpine,add=T) 
+# add the occurrence data to the plotted raster
+plot(redpinesubset,add=TRUE, col="red")
+
+#background red oak
+set.seed(1) 
+bgredoak <- sampleRandom(x=studyArea,
+                   size=10000,
+                   na.rm=T, #removes the 'Not Applicable' points  
+                   sp=T) # return spatial points 
+groupredoak <- kfold(bgredoak, 5)
+
+#background points test and train
+backg_trainredoak <- bgredoak[group != 1, ]
+backg_testredoak <- bgredoak[group == 1, ]
+
+plot(studyArearedoak[[1]])
+# add the background points to the plotted raster
+plot(bgredoak,add=T) 
+# add the occurrence data to the plotted raster
+plot(redoaksubset,add=TRUE, col="blue")
+
+```
+```{r , message=FALSE, warning=FALSE}
+# get the same random sample for training and testing redpine
+set.seed(0)
+groupredpine <- kfold(redpinedata, 5)
+# randomly select 50% for training
+data_trainredpine <- redpinedata[groupredpine!= 1, ]  # used for model training
+data_testredpine <- redpinedata[groupredpine== 1, ]  # used for model testing
+
+# get the same random sample for training and testing redoak
+set.seed(0)
+groupredoak <- kfold(redoakdata, 5)
+# randomly select 50% for training
+data_trainredoak <- redoakdata[groupredoak!= 1, ]  # used for model training
+data_testredoak <- redoakdata[groupredoak== 1, ]  # used for model testing
+
+```
+
+
+```{r , message=FALSE, warning=FALSE}
+# train Maxent with spatial data mycorrhizal
+#checking predictors
+x <- extract(predictors_current, redpinedata)
+sum(is.na(x))
+
+#current distribution redpine
+modredpine<-maxent(predictors_current, data_trainredpine)
+ped1redpine <- predict(modredpine, studyArea)  # studyArea is the clipped rasters 
+plot(ped1redpine)
+
+modredpine
+
+#current distribution redoak
+
+modredoak<-maxent(predictors_current, data_trainredoak)
+ped1redoak <- predict(modredoak, studyArea)  # studyArea is the clipped rasters 
+plot(ped1redoak)
+
+modredoak
+```
+```{r , message=FALSE, warning=FALSE}
+
+#bioclim redpine
+
+pred_nfsredpine<-dropLayer(predictors_current, 'biome')
+
+bclimredpine <- bioclim(pred_nfsredpine, data_trainredpine)
+plot(bclimredpine, a=1, b=2, p=0.85)
+
+e_redpine <- evaluate(data_testredpine, backg_testredpine, bclimredpine, pred_nfsredpine)
+e_redpine
+
+treredpine <- threshold(e_redpine, 'spec_sens')
+treredpine
+
+```
+
+```{r , message=FALSE, warning=FALSE}
+
+#current red pine
+pb2redpine <- predict(pred_nfsredpine, bclimredpine, progress='')
+pb2redpine
+
+northameredpine <- crop(pb2redpine,extent(obuffer))
+par(mfrow=c(1,2))
+plot(northameredpine, main='Bioclim, raw values')
+```
+
+
+
+```{r , message=FALSE, warning=FALSE}
+#redpine together
+equalextentred<-extent(-155.8333,-53.83333,9.333333,69.33333)
+
+makesameextentpb2red <- crop(pb2redpine,extent(equalextentred))
+modelstogetherred <- stack(makesameextentpb2red, ped1redpine)
+
+plot(modelstogetherred)
+
+library(RColorBrewer)
+my.palettepurple <- brewer.pal(n = 9, name = "Purples")
+modelstogethermeanred <- mean(modelstogetherred)
+
+plot(modelstogethermeanred, main="Potential current distribution of red pine (Pinus resinosa)")
+
+```
+```{r , message=FALSE, warning=FALSE}
+
+#bioclim redoak
+
+pred_nfsredoak<-dropLayer(predictors_current, 'biome')
+
+bclimredoak <- bioclim(pred_nfsredoak, data_trainredoak)
+plot(bclimredoak, a=1, b=2, p=0.85)
+
+e_redoak <- evaluate(data_testredoak, backg_testredoak, bclimredoak, pred_nfsredoak)
+e_redoak
+
+treredoak <- threshold(e_redoak, 'spec_sens')
+treredoak
+
+```
+```{r , message=FALSE, warning=FALSE}
+#current red oak
+pb2redoak <- predict(pred_nfsredoak, bclimredoak, progress='')
+pb2redoak
+
+northameredoak <- crop(pb2redoak,extent(obuffer))
+
+par(mfrow=c(1,2))
+plot(northameredoak, main='Bioclim, raw values')
+
+```
+
+```{r , message=FALSE, warning=FALSE}
+
+#redoak together
+equalextentredoak<-extent(-155.8333,-53.83333,9.333333,69.33333)
+
+makesameextentpb2redoak <- crop(pb2redoak,extent(equalextentred))
+modelstogetherredoak <- stack(makesameextentpb2redoak, ped1redoak)
+
+plot(modelstogetherredoak)
+
+library(RColorBrewer)
+my.paletteorange <- brewer.pal(n = 9, name = "Oranges")
+modelstogethermeanredoak <- mean(modelstogetherredoak)
+plot(modelstogethermeanredoak,  main="Potential current distribution of red oak (Quercus rubra)")
+
+
+
+#both trees graph
+par(mfrow=c(1,2))
+plot(modelstogethermeanred, main=" Red pine (Pinus resinosa)")
+plot(modelstogethermeanredoak,  main=" Red oak (Quercus rubra)")
+
+```
+
+
+
+
+
